@@ -68,7 +68,9 @@ def raster_conversion(
 def raster_generation(
     x_func, y_func, z_func,
     filename,
-    savepath=None
+    extract_name,
+    savepath=None,
+    nodata=-9999
 ):
     """
     @Definition:
@@ -82,12 +84,26 @@ def raster_generation(
                                             1D x, 1D y, 1D z datasets
                 filename (string):
                                             Name of raster file
+                extract_name (string):
+                                            Name of a specific output among all flood model outputs
                 savepath (string):
                                             None when saving statistical files such as mean, sd, cv, etc.
                                             If not None, a specific path for saving
+                nodata (float):
+                                            No data value
     @Returns:
                 None.
     """
+    # Choose outputs
+    if extract_name == 'out.max':
+        raster_bathy = wd_raster_bathy
+    elif extract_name == 'out.mxe':
+        raster_bathy = wse_raster_bathy
+    elif extract_name == 'elev':
+        raster_bathy = elev_raster_bathy
+    else:
+        raster_bathy = n_raster_bathy
+
     # Read original DEM raster without padding
     raster_origin = rxr.open_rasterio(
         fr"{original_lidar_path}\\no_padding\\no_padding.nc"
@@ -113,29 +129,121 @@ def raster_generation(
 
     # Set up crs and nodata
     raster_array.rio.write_crs("epsg:2193", inplace=True)
-    raster_array.rio.write_nodata(-999, inplace=True)
+    raster_array.rio.write_nodata(nodata, inplace=True)
 
     # Write into raster file (nc)
     if savepath is None:
         # Saving statistical files such as mean, sd, cv, etc.
         raster_array.rio.to_raster(
-            fr"{raster_bathy}\\{filename}_flowdepth.nc"
+            fr"{raster_bathy}\\{filename}_water.nc"
         )
     else:
-        # Saving files (raster) from merging flowdepth polygons and building polygons
+        # Saving files (raster) from merging water polygons and building polygons
         raster_array.rio.to_raster(fr"{savepath}\\{filename}.nc")
 
 # END RASTER WRITING ###################################################################################################
 
 
-# MERGE FLOWDEPTH POLYGONS AND BUILDING POLYGONS #######################################################################
-def flowdepth_raster_nobackground(
+# MERGE WATER POLYGONS AND BUILDING POLYGONS #######################################################################
+def apply_zero_values(dataset_func, extract_name):
+    """
+    @Definition:
+                A function to get zero values
+    @References:
+
+    @Arguments:
+                dataset_func (pandas dataframe):
+                                         A full dataset of water depth, water surface
+                                         elevation, elevation including x and y coordinates
+                extract_name (string):
+                                        Name of a specific output among all flood model outputs
+
+    @Returns:
+
+
+    """
+    # Copy dataset
+    copy_dataset = dataset_func.copy(deep=True)
+
+    # Replace -9999 with 0
+    if extract_name == 'out.mxe':
+        replaced_dataset = copy_dataset.replace([-9999], 0)
+    else:
+        replaced_dataset = copy_dataset
+
+    # Remove geometry data (x, y coordinates)
+    nogeo_dataset = replaced_dataset.drop([
+        'x_coord',
+        'y_coord'
+    ], axis=1)
+
+    # Calculate mean data to filter rows which are not flooded at all
+    # and rows which have some simulations have flooding
+    # and some do not have
+
+    # Calculate mean
+    mean_dataset = nogeo_dataset.copy(deep=True)
+    mean_dataset['mean'] = nogeo_dataset.mean(axis=1)
+
+    # Replace rows which are full of 0 values or mean = 0 with -9999
+    mean_dataset.loc[mean_dataset['mean']==0, :] = -9999
+
+    # Drop mean column after using it to filter
+    new_dataset = mean_dataset.drop(mean_dataset.columns[-1], axis=1)
+
+    # Return
+    return new_dataset
+
+
+def get_floodrate_index(flood_rate, csv_path=None):
+    """
+    @Definition:
+                A function to collect floodrate index
+    @References:
+
+    @Arguments:
+                flood_rate (float):
+                                        A rate where the flood was defined
+    @Returns:
+                new_dataframe (pandas dataframe):
+                                        A dataframe includes x, y coordinates and filtered water depth values
+    """
+    # Get water depth data
+    if csv_path is None:
+        df_wd = pd.read_csv(fr"{wd_csv_bathy}\\all_simulations.csv")
+    else:
+        df_wd = pd.read_csv(fr"{csv_path[1]}\\all_simulations.csv")
+
+    # Get zero values. These dataframes have no geometry/coordinates
+    df_wd_zero = apply_zero_values(df_wd, 'out.max')
+
+    # Calculate the mean of water depth
+    # to filter the flood rate for both
+    # water surface elevation and water depth
+
+    # Mean of water depth for filtering by water depth flood rate
+    floodrate_df = df_wd_zero.copy(deep=True)
+    floodrate_df['mean'] = df_wd_zero.mean(axis=1)
+
+    # Filter flood rate and get its index (list format).
+    # Indices in this list will be used to filter out
+    # and replace values having the same indices in other dataframes
+    # with -9999
+    floodrate_index = floodrate_df['mean'].index[
+        (floodrate_df['mean'] > 0)  # Larger than 0 to filter out -9999
+        & (floodrate_df['mean'] < flood_rate)].tolist()  # Smaller than flood rate
+
+    return floodrate_index
+
+
+def water_raster_nobackground(
     dataset_origin,
-    flood_rate
+    flood_rate,
+    extract_name
 ):
     """
     @Definition:
-                A function to generate raster of flowdepth map (excluding background). This flowdepth map will be
+                A function to generate raster of water map (excluding background). This water map will be
                 used to convert into polygon (to get only one big polygon to merge with buildings rather than many
                 pixel polygons)
     @References:
@@ -147,34 +255,50 @@ def flowdepth_raster_nobackground(
                                     after un-transformation
                 flood_rate (float):
                                     A rate where the flood was defined
+                extract_name (string):
+                                    Name of a specific output among all flood model outputs
     @Returns:
                 None.
     """
-    # Copy dataset to avoid the original dataset being changed
-    dataset = dataset_origin.copy(deep=True)
+    # Choose flood outputs
+    if extract_name == 'out.max':
+        oneraster_bathy = wd_oneraster_bathy
+    else:
+        oneraster_bathy = wse_oneraster_bathy
+
+    # Copy dataset to avoid the original dataset being changed and replace 0 with -9999
+    # to create raster with nodata as -9999
+    dataset = dataset_origin.replace([0], -9999)
+
+    # Get flood rate index
+    floodrate_index = get_floodrate_index(flood_rate)
 
     for num_file in range(len(dataset.columns) - 2): # Minus 2 due to two columns of coordinates x and y
-        # Convert background to -999
-        col = dataset.columns[num_file + 2] # Plus 2 due to two columns of coordinates x and y
-        dataset.loc[dataset[col] < flood_rate, [col]] = -999
 
-        # Generate flowdepth raster excluding background
+        # Convert background to -9999
+        col = dataset.columns[num_file + 2] # Plus 2 due to two columns of coordinates x and y
+        dataset.loc[floodrate_index, [col]] = -9999
+
+        # Generate water raster excluding background
+        # Water surface elevation
         raster_generation(
             dataset['x_coord'],
             dataset['y_coord'],
             dataset[f'{col}'],
             f"nobackground_{col}",
+            extract_name,
             oneraster_bathy
         )
 
-def flowdepthmap_to_onepolygon(
+def watermap_to_onepolygon(
     dataset_origin,
     flood_rate,
+    extract_name,
     column_num
 ):
     """
     @Definition:
-                A function to convert flowdepth map (after excluding background) into one big polygon rather than
+                A function to convert water map (after excluding background) into one big polygon rather than
                 many pixel polygons
     @References:
                 https://numpy.org/doc/stable/reference/generated/numpy.copy.html
@@ -185,18 +309,30 @@ def flowdepthmap_to_onepolygon(
                                     after un-transformation
                 flood_rate (float):
                                     A rate where the flood was defined
+                extract_name (string):
+                                    Name of a specific output among all flood model outputs
                 column_num (int):
                                     Ordinal number of column of simulation defined in the dataset (pandas dataframe)
     @Returns:
                 None.
     """
-    # Copy dataset to avoid the original dataset being changed
-    dataset = dataset_origin.copy(deep=True)
+    # Choose flood outputs
+    if extract_name == 'out.max':
+        onepolygon_bathy = wd_onepolygon_bathy
+        oneraster_bathy = wd_oneraster_bathy
+    else:
+        onepolygon_bathy = wse_onepolygon_bathy
+        oneraster_bathy = wse_oneraster_bathy
+
+
+    # Copy dataset to avoid the original dataset being changed and replace 0 with -9999
+    # to create raster with nodata as -9999
+    dataset = dataset_origin.replace([0], -9999)
 
     # Get column value
     column = dataset.columns[column_num + 2]
 
-    # Read flowdepth map (raster) after excluding background already
+    # Read water map (raster) after excluding background already
     raster_poly = rasterio.open(
         fr"{oneraster_bathy}\\nobackground_{column}.nc"
     )
@@ -237,7 +373,9 @@ def flowdepthmap_to_onepolygon(
     )
 
     # Select only FLOODED area by using the filter rate
-    flood_polygons_list = poly_dataframe[poly_dataframe['depth'] >= flood_rate]['geometry'].tolist()
+    floodrate_index = get_floodrate_index(flood_rate)
+    poly_dataframe.loc[floodrate_index, 'depth'] = -9999
+    flood_polygons_list = poly_dataframe.loc[poly_dataframe['depth']!=-9999, :]['geometry'].tolist()
 
     # Combine all polygons into one using function unary_union of shapely package
     one_flood_polygon = gpd.GeoSeries(unary_union(flood_polygons_list))
@@ -251,17 +389,18 @@ def flowdepthmap_to_onepolygon(
 
     # Write out polygon
     one_poly_gdf.to_csv(
-        fr"{onepolygon_bathy}\\flowdepth_polygon_{column}.csv", index=False
+        fr"{onepolygon_bathy}\\water_polygon_{column}.csv", index=False
     )
 
-def flowdepthmap_onepolygon_parallelism(
+def watermap_onepolygon_parallelism(
     dataset,
     flood_rate,
-    num_processes
+    num_processes,
+    extract_name
 ):
     """
     @Definition:
-                A function to convert all flowdepth maps (after excluding background) into one-big polygons rather than
+                A function to convert all water maps (after excluding background) into one-big polygons rather than
                 many pixel polygons by multiprocessing
     @References:
                 https://numpy.org/doc/stable/reference/generated/numpy.copy.html
@@ -274,25 +413,28 @@ def flowdepthmap_onepolygon_parallelism(
                                     A rate where the flood was defined
                 num_processes (int):
                                     A number of process for the parallelism
+                extract_name (string):
+                                    Name of a specific output among all flood model outputs
     @Returns:
                 None.
     """
-    # Get list of all flowdepth files
-    all_flowdepth_files = list(range(len(dataset.columns) - 2)) # Minus 2 for two columns of x and y coordinates
+    # Get list of all water files
+    all_water_files = list(range(len(dataset.columns) - 2)) # Minus 2 for two columns of x and y coordinates
 
     # Design func parameters
     func = partial(
-        flowdepthmap_to_onepolygon,
+        watermap_to_onepolygon,
         dataset,
-        flood_rate
+        flood_rate,
+        extract_name
     )
 
     # Design the pool and execute the multiprocessing
     with multiprocessing.Pool(processes=num_processes) as pool:
-        pool.map(func, all_flowdepth_files)
+        pool.map(func, all_water_files)
     pool.close()
     pool.join()
 
-# END MERGE FLOWDEPTH POLYGONS AND BUILDING POLYGONS ###################################################################
+# END MERGE WATER POLYGONS AND BUILDING POLYGONS ###################################################################
 
 

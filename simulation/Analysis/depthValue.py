@@ -117,6 +117,7 @@ def xyz_array(
 
 # END CONVERT RECTANGLE ARRAY INTO 3D XYZ ARRAY ########################################################################
 
+
 # POINT SAMPLE #########################################################################################################
 def clip_padding_xyzdataset(
     dataset
@@ -204,10 +205,11 @@ def point_sample_generation(
 
 
 # DEPTH VALUES #########################################################################################################
-def get_flowdepth_values(point_sample_csv, flowdepth_file):
+def get_water_values(point_sample_csv, water_file):
     """
     @Definition:
-                A function to extract flowdepth at given coordinates from any geometry files
+                A function to extract flood model outputs (water depth or water surface elevation) at given coordinates
+                from any geometry files
     @References:
                 https://gis.stackexchange.com/questions/102933/more-efficient-spatial-join-in-python-without-qgis-arcgis-postgis-etc/103066#103066
                 https://gis.stackexchange.com/questions/121469/get-shapefile-polygon-attribute-value-at-a-specific-point-using-python-e-g-via
@@ -227,14 +229,15 @@ def get_flowdepth_values(point_sample_csv, flowdepth_file):
     @Arguments:
                 point_sample_csv (geopandas DataFrame):
                                         A geospatial dataframe contains point sample's coordinates
-                flowdepth_file (string):
-                                        A directory of a simulation csv file of flowdepth
+                water_file (string):
+                                        A directory of a simulation csv file of flood model outputs (water depth or
+                                        water surface elevation)
     @Returns:
                 new_array (array):
                                         An array of coordinate
     """
     # Get the files
-    infile_csv = pd.read_csv(flowdepth_file, engine='pyarrow')
+    infile_csv = pd.read_csv(water_file, engine='pyarrow')
     infile_csv['geometry'] = infile_csv['geometry'].apply(wkt.loads)
     infile_csv = gpd.GeoDataFrame(infile_csv, crs='epsg:2193')
 
@@ -249,19 +252,20 @@ def get_flowdepth_values(point_sample_csv, flowdepth_file):
     index_by_id = dict((id(pt), i) for i, pt in enumerate(list_file_polygon))
 
     # Empty list
-    flowdepth_list = []
+    water_list = []
 
     # Get intersected tuple
     for num_point in range(len(list_file_point)):
         intersect_tuple = [(index_by_id[id(pts)], pts.wkt) for pts in tree.query(list_file_point[num_point]) if
                            list_file_point[num_point].within(pts)]
-        flowdepth_list.append(infile_csv.iloc[intersect_tuple[0][0]]['depth'])
+        water_list.append(infile_csv.iloc[intersect_tuple[0][0]]['depth'])
 
-    return flowdepth_list
+    return water_list
 
 
-def get_flowdepth_parallelism(
-    num_processes
+def get_water_parallelism(
+    num_processes,
+    extract_name
 ):
     """
     @Definition:
@@ -271,17 +275,35 @@ def get_flowdepth_parallelism(
     @Arguments:
                 num_processes (int):
                                         A number of process for the parallelism
+                extract_name (string):
+                                        Name of a specific output among all flood model outputs
     @Returns:
                 new_array (array):
                                         An array of coordinate
     """
     # Get necessary parameters -----------------------
+    # Choose output
+    if extract_name == 'out.max':
+        bathy_water = bathy_wd
+        csv_bathy = wd_csv_bathy
+    elif extract_name == 'out.mxe':
+        bathy_water = bathy_wse
+        csv_bathy = wse_csv_bathy
+    elif extract_name == 'elev':
+        bathy_water = bathy_elev
+        csv_bathy = elev_csv_bathy
+    elif extract_name == 'new_wse':
+        bathy_water = bathy_new_wse
+        csv_bathy = new_wse_csv_bathy
+    else:
+        bathy_water = bathy_n
+        csv_bathy = n_csv_bathy
 
     # Get point sample dataframe
     point_sample_df = point_sample_generation(True)
 
     # Get all csv folders
-    all_csv_folders = glob.glob(fr"{bathy_flowdepth}\\bathy_*")
+    all_csv_folders = glob.glob(fr"{bathy_water}\\bathy_*")
 
     # Get all column names
     column_names = [Path(all_csv_folders[i]).stem for i in range(len(all_csv_folders))]
@@ -293,13 +315,13 @@ def get_flowdepth_parallelism(
 
     # Design func parameters
     func = partial(
-        get_flowdepth_values,
+        get_water_values,
         point_sample_csv,
     )
 
     # Design the pool and execute the multiprocessing
     with multiprocessing.Pool(processes=num_processes) as pool:
-        flowdepth_df = pd.DataFrame(
+        water_df = pd.DataFrame(
             pool.map(func, all_csv_folders),
             index=column_names
         ).T
@@ -307,13 +329,78 @@ def get_flowdepth_parallelism(
     pool.join()
 
     # Add x coordinate column
-    flowdepth_df.insert(0, 'y_coord', value=point_sample_csv['y_coord'])
-    flowdepth_df.insert(0, 'x_coord', value=point_sample_csv['x_coord'])
+    water_df.insert(0, 'y_coord', value=point_sample_csv['y_coord'])
+    water_df.insert(0, 'x_coord', value=point_sample_csv['x_coord'])
 
     # Write out file
-    flowdepth_df.to_csv(fr"{csv_bathy}\\all_simulations.csv", index=False)
+    water_df.to_csv(fr"{csv_bathy}\\all_simulations.csv", index=False)
 
-    return flowdepth_df
-
+    return water_df
 
 # END DEPTH VALUES #####################################################################################################
+
+
+# GET RMSE #############################################################################################################
+def get_geoforRMSE_parallelism(
+    num_processes
+):
+    """
+    @Definition:
+                A function to extract flowdepth at given coordinates from any geometry files by multiprocessing
+    @References:
+                https://stackoverflow.com/questions/43175382/python-create-a-pandas-data-frame-from-a-list
+    @Arguments:
+                num_processes (int):
+                                        A number of process for the parallelism
+
+    @Returns:
+                pts_extraction_df (pandas dataframe):
+                                        A dataframe contains values of water elevation surface at observed points
+                validation_df (pandas dataframe):
+                                        A dataframe contains observed values
+    """
+    # Get necessary parameters -----------------------
+
+    # Get point of observed data
+    # Get observed data
+    obs_data_df = gpd.read_file(fr"{other_data}\2005t_Flood.shp")
+    # Choose geometry and level
+    debris_df = obs_data_df[['geometry', 'X', 'Y', 'level_']]
+    # Rename
+    debris_df.rename(columns={'X': 'x', 'Y': 'y', 'level_': 'level'}, inplace=True)
+    # Copy the dataframe and call it validation dataframe
+    validation_df = debris_df.copy(deep=True)
+    # Extract geometry only
+    validation_geo_df = gpd.GeoDataFrame(validation_df['geometry'])
+    # List all parameters
+    point_sample_csv = validation_geo_df
+
+    # Get all csv folders
+    all_csv_folders = glob.glob(fr"{bathy_new_wse}\\bathy_*")
+    # Get all column names
+    column_names = [Path(all_csv_folders[i]).stem for i in range(len(all_csv_folders))]
+
+    # Design func parameters
+    func = partial(
+        get_water_values,
+        point_sample_csv,
+    )
+
+    # Design the pool and execute the multiprocessing
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        pts_extraction_df = pd.DataFrame(
+            pool.map(func, all_csv_folders),
+            index=column_names
+        ).T
+    pool.close()
+    pool.join()
+
+    # Replace -9999 with NaN
+    pts_extraction_df = pts_extraction_df.replace(-9999, np.nan)
+
+    # Write out file
+    pts_extraction_df.to_csv(fr"{new_wse_csv_bathy}\\rmse_all_simulations.csv", index=False)
+    validation_df.to_csv(fr"{new_wse_csv_bathy}\\rmse_validation.csv", index=False)
+
+    return pts_extraction_df, validation_df
+# END RMSE #############################################################################################################
