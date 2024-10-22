@@ -31,7 +31,7 @@ This project includes 2 main folders as described below.
 
 - [simulation](https://github.com/Martin20494/Bathymetry_Uncertainty/tree/main/simulation): Including `Modelling_CMR` and `Modelling_UF` sub-folders used to generate simulations; `Analysis` sub-folder used to generate analysis results; `Executing` sub-folder includes all Jupyter Notebooks used to run the other subfolders to generate and analyse simulations.
 
-- [other_files](https://github.com/Martin20494/Bathymetry_Uncertainty/tree/main/other_files): Including `data` and `scripts` sub-folders used to store all results from this project, figures for manuscript, and data sources.
+- [other_files](https://github.com/Martin20494/Bathymetry_Uncertainty/tree/main/other_files): Including `all_results`, `flow_tide`, `map`, `simulation_process` sub-folders that store all figures, tables, and results in the paper and the research.
 
 ## Acknowledgement
 
